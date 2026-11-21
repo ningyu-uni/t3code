@@ -1,0 +1,73 @@
+name: Desktop · Linux x64 AppImage (fork)
+
+# Build the desktop app's unsigned Linux x64 AppImage from this fork without the
+# release orchestration: one job, no signing secrets, no publish configuration.
+# The script resolves the version from the source, writes to `release/`, and the
+# AppImage lands in the run artifacts as `desktop-linux-x64-appimage`.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build AppImage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      # The vendored `.repos` tree is large and not part of the build; skip it.
+      - name: Checkout
+        shell: bash
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "$GITHUB_REF_NAME"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git -c checkout.workers=0 checkout --detach FETCH_HEAD
+
+      # The Linux artifact build links the browser-secret helper against the
+      # host's libsecret and runs packaged Electron for bytecode preparation,
+      # which needs GTK, NSS, ALSA, and GBM (docs/operations/development.md).
+      - name: Install Linux desktop build libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsecret-1-dev pkg-config libgtk-3-0t64 libnss3 \
+            libasound2t64 libgbm1 patchelf
+          if ! command -v magick >/dev/null 2>&1 && ! command -v convert >/dev/null 2>&1; then
+            sudo apt-get install -y imagemagick
+          fi
+
+      # The resource monitor and the KDE/Hyprland capture helpers are Rust
+      # crates compiled during packaging.
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Setup dependencies
+        uses: ./.github/actions/setup-ci-deps
+        with:
+          install-args: --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/scripts...
+
+      # Calling the artifact script directly avoids relying on flag forwarding
+      # through the package script.
+      - name: Build the AppImage
+        run: |
+          node scripts/build-desktop-artifact.ts --platform linux --target AppImage --arch x64 --verbose
+          ls -la release/
+          sha256sum release/*.AppImage > release/SHA256SUMS
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: desktop-linux-x64-appimage
+          path: |
+            release/*.AppImage
+            release/SHA256SUMS
+          if-no-files-found: error
+          compression-level: 0
